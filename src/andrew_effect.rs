@@ -1,18 +1,95 @@
-use std::{collections::{VecDeque}, iter::Filter, sync::{Arc, Weak}};
-use crate::{AndrewParams, Conv};
+use std::{collections::{VecDeque}, iter::Filter, ops::Mul, sync::{Arc, Weak}, f32::consts};
+use crate::{AndrewParams, AndrewVst, audio_clip::AudioClip, modulator::Lfo};
 use crate::biquad::{BiQuadraticFilter, FilterKind::{self, *}};
 
 pub trait AndrewEffect {
-	fn process( &mut self, chan_id: usize, in_buf: &[f32], out_buf: &mut [f32] );
+	fn process( &mut self, chan_id: usize, in_buf: &[f32], out_buf: &mut [f32] ) {
+		(0..in_buf.len()).for_each(|i| out_buf[i] = in_buf[i] );
+	}
 
 	fn update_params( &mut self ) {}
 
-	#[inline]
-	fn get_params( &self ) -> Weak<AndrewParams> {
-		Weak::new()
+	fn get_latency( &self ) -> usize {1}
+}
+
+#[derive(Default)]
+pub struct DistEffect {
+	params: Weak<AndrewParams>,
+	gain: f32,
+}
+
+
+impl AndrewEffect for DistEffect {
+	fn process(&mut self, _chan_id: usize, in_buf: &[f32], out_buf: &mut [f32]) {
+
+		let d = self.gain;
+		let n = ((1.0 +  4.0/d).sqrt() - 1.0) * 0.5;
+
+		for i in 0..in_buf.len() {
+
+			let x = out_buf[i] * self.gain;
+			let y = 1.0 - 1.0/(d*(x+n)) + n;
+			out_buf[i] = y;
+		}
+	}
+
+	fn update_params(&mut self) {
+		if let Some(params) = self.params.upgrade() {
+			self.gain = params.delay_feedback.get() * 2.0;
+		}
 	}
 }
 
+impl DistEffect {
+	pub fn new( params: Weak<AndrewParams> ) -> Self {
+		DistEffect {
+			params,
+			gain: 1.0,
+		}
+	}
+}
+
+
+
+
+pub struct GrainShiftEffect {
+	grains: [Vec<AudioClip>; 2],
+	pitch: f32,
+}
+
+impl AndrewEffect for GrainShiftEffect {
+
+}
+
+
+
+pub struct VibEffect {
+	bufs: [AudioClip; 2],
+	lfo: [Lfo; 2],
+}
+
+impl AndrewEffect for VibEffect {
+	fn process(&mut self, chan_id: usize, in_buf: &[f32], out_buf: &mut [f32]) {
+		if chan_id > 2 { return }
+		self.lfo[chan_id].forward( in_buf.len() as u32 );
+		self.bufs[chan_id].scale = 1.0 - (self.lfo[chan_id].get() * 0.02);
+		self.bufs[chan_id].extend( &in_buf );
+
+		out_buf.iter_mut().for_each(|out| *out = self.bufs[chan_id].read_playhead() );
+		self.bufs[chan_id].shrink();
+	}
+}
+
+
+impl VibEffect {
+	pub fn new() -> Self {
+		let buf = AudioClip::new(512, 1.0, 44100.0, false);
+		VibEffect {
+			bufs: [buf.clone(), buf.clone()],
+			lfo: [Lfo::default(), Lfo::default()],
+		}
+	}
+}
 
 pub struct FilterEffect {
 	state: [BiQuadraticFilter; 2],
@@ -187,8 +264,7 @@ pub struct SlewEffect {
 
 impl AndrewEffect for SlewEffect {
 	fn process(&mut self, chan_id: usize, in_buf: &[f32], out_buf: &mut [f32]) {
-		// // out_buf.iter_mut().zip(in_buf.iter()).for_each(|(out, samp)| *out = 0.0);
-
+	
 		let max_b = self.amount;
 
 		for i in 0..in_buf.len() {
@@ -216,20 +292,9 @@ impl SlewEffect {
 			params,
 		}
 	}
-}
 
-
-pub struct TooSlewEffect {
-	target_sample: [f32; 2],
-	prev_sample: [f32; 2],
-	amount: f32,
-	params: Weak<AndrewParams>,
-}
-
-impl AndrewEffect for TooSlewEffect {
 	fn process(&mut self, chan_id: usize, in_buf: &[f32], out_buf: &mut [f32]) {
-		// // out_buf.iter_mut().zip(in_buf.iter()).for_each(|(out, samp)| *out = 0.0);
-
+	
 		let max_b = self.amount;
 
 		for i in 0..in_buf.len() {
@@ -248,16 +313,58 @@ impl AndrewEffect for TooSlewEffect {
 	}
 }
 
+
+pub struct TooSlewEffect {
+	target_sample: [f32; 2],
+	prev_sample: [f32; 2],
+
+	target_slope: [f32; 2],
+	prev_slope: [f32; 2],
+	amount: f32,
+
+	params: Weak<AndrewParams>,
+}
+
 impl TooSlewEffect {
 	pub fn new( params: Weak<AndrewParams> ) -> Self {
 		TooSlewEffect {
 			target_sample: [0.0; 2],
 			prev_sample: [0.0; 2],
+			target_slope: [0.0; 2],
+			prev_slope: [0.0; 2],
 			amount: 1.0,
 			params,
 		}
 	}
 }
+
+impl AndrewEffect for TooSlewEffect {
+	fn process(&mut self, chan_id: usize, in_buf: &[f32], out_buf: &mut [f32]) {
+		// // out_buf.iter_mut().zip(in_buf.iter()).for_each(|(out, samp)| *out = 0.0);
+
+		let max_b = self.amount;
+
+		for i in 0..in_buf.len() {
+			self.target_sample[chan_id] = in_buf[i];
+			self.target_slope[chan_id] 	= self.target_sample[chan_id] - self.prev_sample[chan_id];
+			let accel  					= self.target_slope[chan_id] - self.prev_slope[chan_id];
+
+			let slope 					= self.prev_slope[chan_id] + accel;
+			let sample 					= self.prev_sample[chan_id] + slope;
+
+			out_buf[i] = sample;
+			self.prev_sample[chan_id] = sample;
+			self.prev_slope[chan_id] = slope;
+		}
+	}
+
+	fn update_params(&mut self) {
+		if let Some(params) = self.params.upgrade() {
+			self.amount = params.slew.get() / ( params.sample_rate.get() );
+		}
+	}
+}
+
 
 
 

@@ -1,5 +1,5 @@
 [package]
-name = "conv"
+name = "andr_vst"
 version = "0.1.0"
 authors = ["Andrew J.C. Wilson <ajcheyneywilson@gmail.com>"]
 edition = "2018"
@@ -12,5 +12,5 @@ edition = "2018"
 vst = "0.2.0"
 
 [lib]
-name = "conv"
+name = "andr_vst"
 crate-type = ["cdylib"]

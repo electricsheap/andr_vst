@@ -5,9 +5,11 @@ extern crate vst;
 
 
 use andrew_effect::*;
-use vst::plugin::{Category, HostCallback, Info, Plugin, PluginParameters};
+use vst::{api::EventType, plugin::{Category, HostCallback, Info, Plugin, PluginParameters}};
 use vst::buffer::AudioBuffer;
 use vst::util::AtomicFloat;
+use vst::api;
+use vst::event::Event;
 
 
 mod andrew_effect;
@@ -19,42 +21,37 @@ mod log;
 use log::Logger;
 
 mod types;
+mod audio_clip;
+mod modulator;
 
-
-use std::{cell::{Ref, RefCell}, path::Path, rc::Weak, sync::atomic::{AtomicBool, Ordering}};
+use std::{cell::{Ref, RefCell}, path::Path, rc::Weak, sync::atomic::{self, AtomicBool, AtomicU8, Ordering}};
 use std::sync::Arc;
 
 #[derive(Default)]
-struct Conv {
+struct AndrewVst {
 	sample_rate: f32,
 	logger: Logger,
 	params: Arc<AndrewParams>,
 	effects: Vec<Box<dyn AndrewEffect>>,
 }
 
-
-impl Conv {
-
-}
-
-impl Plugin for Conv {
+impl Plugin for AndrewVst {
 
 	fn new(_host: HostCallback) -> Self
 	where Self: Sized + Default, {
 		let params = Arc::new(<AndrewParams as Default>::default());
-
-
-		let effects: Vec<Box<dyn AndrewEffect>> = vec![
-			Box::new(FilterEffect::new(Arc::downgrade(&params))),
-			Box::new(SlewEffect::new(Arc::downgrade(&params))),
-		];
-
-		Conv {
+		let weak = Arc::downgrade(&params);
+		AndrewVst {
 			sample_rate: 44100.0,
 			logger: Logger::new( &Path::new("/Library/Audio/Plug-Ins/VST/Custom/conv_log.txt")),
 			params,
-			effects,
+			effects: vec![Box::new(DistEffect::new(weak))],
 		}
+	}
+
+	fn init( &mut self ) {
+		// self.effects.push(Box::new(SlewEffect::new( Arc::downgrade( &self.params ))));
+		self.effects.push(Box::new(VibEffect::new()));
 	}
 
 	fn get_info(&self) -> Info {
@@ -63,7 +60,7 @@ impl Plugin for Conv {
 			vendor: "Andrew Wilson".into(),
 			inputs: 2,
 			outputs: 2,
-			parameters: 10,
+			parameters: 5,
 			category: Category::Effect,
 			..Default::default()
 		}
@@ -75,7 +72,6 @@ impl Plugin for Conv {
 		self.logger.log(&format!("changed sample rate too {}", rate));
 	}
 
-	fn init( &mut self ) {}
 
 	fn process( &mut self, buffer: &mut AudioBuffer<f32> ) {
 		// must have at most two channels 
@@ -93,8 +89,8 @@ impl Plugin for Conv {
 		
 		for (chan_id, (in_chan, out_chan)) in buffer.zip().enumerate() {
 			// out_chan.iter_mut().zip(in_chan.iter()).for_each(|(out, samp)| *out = *samp);
-			let in_vec = Vec::from(in_chan);
-			let out_vec = vec![0f32; buf_len];
+			let mut in_vec = Vec::from(in_chan);
+			let mut out_vec = vec![0f32; buf_len];
 
 			let mut buf = (in_vec, out_vec);
 			for effect in self.effects.iter_mut() {
@@ -107,6 +103,7 @@ impl Plugin for Conv {
 			}
 
 			let dry_wet = self.params.dry_wet.get();
+
 			for i in 0..buf.0.len() {
 				out_chan[i] = (buf.0[i] * dry_wet)  +  (in_chan[i] * (1.0 - dry_wet));
 			}
@@ -118,6 +115,9 @@ impl Plugin for Conv {
 		Arc::clone( &self.params ) as Arc<dyn PluginParameters>
 	}
 }
+
+
+
 
 
 pub struct AndrewParams {
@@ -154,7 +154,7 @@ impl PluginParameters for AndrewParams {
 	fn get_parameter_text( &self, i: i32 ) -> String {
 		match i {
 			0 => format!("{:.1}", self.dry_wet.get()).into(),
-			1 => format!("{:.1}", self.slew.get() / 100.0).into(),
+			1 => format!("{:.1}", self.slew.get()).into(),
 			2 => format!("{:.1}", self.delay_time.get() * 100.0).into(),
 			3 => format!("{:.1}", self.delay_feedback.get() * 100.0).into(),
 			4 => format!("{:.1}", self.cutoff.get()).into(),
@@ -192,16 +192,15 @@ impl Default for AndrewParams {
 			updated: AtomicBool::new(true),
 			sample_rate: AtomicFloat::new(44100.0),
 			dry_wet: AtomicFloat::new(1.0),
-			slew: AtomicFloat::new(1.0),
+			slew: AtomicFloat::new(20_f32 * 1000_f32.powf(1.0)),
 			delay_time: AtomicFloat::new(0.01),
 			delay_feedback: AtomicFloat::new(1.0),
-
 			cutoff: AtomicFloat::new(1.0),
 		}
 	}
 }
 
-plugin_main!(Conv); // Important!
+plugin_main!(AndrewVst); // Important!
 
 
 
